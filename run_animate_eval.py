@@ -39,6 +39,108 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
+import types
+
+# -----------------------------------------------------------------------------
+# Compatibility Shims: Isolate optional modules (speech2video, triton, decord, moviepy)
+# -----------------------------------------------------------------------------
+# 1. Triton mock for Windows (prevents transformers/diffusers from crashing on missing triton)
+if 'triton' not in sys.modules:
+    try:
+        import triton
+    except Exception:
+        triton_mock = types.ModuleType('triton')
+        triton_mock.__version__ = '2.1.0'
+        sys.modules['triton'] = triton_mock
+        sys.modules['triton.language'] = types.ModuleType('triton.language')
+
+# 2. Isolate speech2video (prevents wan.__init__ from failing on wav2vec2/triton)
+if 'wan.speech2video' not in sys.modules:
+    mock_s2v = types.ModuleType('wan.speech2video')
+    mock_s2v.WanS2V = None
+    sys.modules['wan.speech2video'] = mock_s2v
+
+# 3. Decord fallback using OpenCV VideoCapture
+if 'decord' not in sys.modules:
+    try:
+        import decord
+    except Exception:
+        import cv2
+        class FallbackVideoReader:
+            def __init__(self, uri, ctx=None):
+                self.uri = str(uri)
+                cap = cv2.VideoCapture(self.uri)
+                self._frames = []
+                while True:
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        break
+                    self._frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                self.fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                cap.release()
+                self._data = np.stack(self._frames, axis=0) if self._frames else np.zeros((0, 0, 0, 3), dtype=np.uint8)
+
+            def __len__(self):
+                return len(self._frames)
+
+            def get_avg_fps(self):
+                return self.fps
+
+            def get_frame_timestamp(self, idx):
+                if idx == -1 or idx == len(self._frames) - 1:
+                    return [0.0, len(self._frames) / self.fps]
+                return [0.0, idx / self.fps]
+
+            def get_batch(self, indices):
+                class BatchWrapper:
+                    def __init__(self, arr):
+                        self.arr = arr
+                    def asnumpy(self):
+                        return self.arr
+                if isinstance(indices, (int, slice)):
+                    return BatchWrapper(self._data[indices])
+                return BatchWrapper(self._data[list(indices)])
+
+        mock_decord = types.ModuleType('decord')
+        mock_decord.VideoReader = FallbackVideoReader
+        mock_decord.cpu = lambda x=0: None
+        mock_decord.gpu = lambda x=0: None
+        sys.modules['decord'] = mock_decord
+
+# 4. MoviePy fallback using OpenCV VideoWriter
+try:
+    import moviepy.editor as _test_mpy
+    assert hasattr(_test_mpy, 'ImageSequenceClip')
+except Exception:
+    import cv2
+    class FallbackImageSequenceClip:
+        def __init__(self, sequence, fps=30):
+            self.sequence = sequence
+            self.fps = fps
+
+        def write_videofile(self, filename, **kwargs):
+            if not self.sequence:
+                return
+            h, w = self.sequence[0].shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(filename), fourcc, float(self.fps), (w, h))
+            for img in self.sequence:
+                if img.ndim == 3 and img.shape[2] == 3:
+                    bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                elif img.ndim == 3 and img.shape[2] == 1:
+                    bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                else:
+                    bgr = img
+                out.write(bgr)
+            out.release()
+
+    mock_mpy = types.ModuleType('moviepy')
+    mock_mpy_editor = types.ModuleType('moviepy.editor')
+    mock_mpy.ImageSequenceClip = FallbackImageSequenceClip
+    mock_mpy_editor.ImageSequenceClip = FallbackImageSequenceClip
+    sys.modules['moviepy'] = mock_mpy
+    sys.modules['moviepy.editor'] = mock_mpy_editor
+
 # Append Wan2.2 root and preprocess directories to sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -543,7 +645,8 @@ def initialize_wan_animate(ckpt_dir: str, offload_model: bool = True, device: st
         )
         return wan_animate
     except Exception as e:
-        print(f"[Warning] Failed to instantiate WanAnimate model: {e}")
+        print(f"\n[Warning] Failed to instantiate WanAnimate model: {e}")
+        traceback.print_exc()
         return None
 
 
@@ -1023,6 +1126,14 @@ def main():
             offload_model=args.offload_model,
             device=args.device
         )
+        if wan_model is None:
+            print("\n" + "=" * 80)
+            print("[FATAL ERROR] WanAnimate model could not be initialized!")
+            print("=" * 80)
+            print("Video generation cannot proceed because the WanAnimate model failed to load.")
+            print("Please see the detailed traceback above to fix the missing package or checkpoint.")
+            print("=" * 80 + "\n")
+            sys.exit(1)
 
     if not args.skip_eval:
         print("[Init] Initializing FVD Spatio-Temporal Feature Extractor (3D-ResNet)...")
