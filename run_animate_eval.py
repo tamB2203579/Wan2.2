@@ -100,14 +100,14 @@ def parse_args():
     parser.add_argument(
         "--ckpt_dir",
         type=str,
-        default="./Wan2.2-T2V-A14B",
-        help="Directory containing Wan2.2 Animate / T2V-A14B model checkpoints."
+        default="./Wan2.2-Animate-14B",
+        help="Directory containing Wan2.2-Animate-14B model checkpoints."
     )
     parser.add_argument(
         "--preprocess_ckpt_dir",
         type=str,
-        default="./preprocess_ckpts",
-        help="Directory containing YOLO and ViTPose preprocessing models."
+        default="./process_checkpoint",
+        help="Directory containing YOLO and ViTPose preprocessing models (e.g. ./process_checkpoint or ./preprocess_ckpts)."
     )
 
     # Runtime & Execution
@@ -255,43 +255,232 @@ def resolve_reference_avatar(ref_arg_path: str) -> str:
 
 
 # ==============================================================================
-# 3. PIPELINE INITIALIZATION
+# 3. PIPELINE INITIALIZATION & CHECKPOINT RESOLUTION
 # ==============================================================================
-def initialize_preprocessor(preprocess_ckpt_dir: str, replace_flag: bool = False, device: str = "cuda:0"):
+def resolve_preprocess_checkpoints(
+    preprocess_ckpt_dir: str,
+    ckpt_dir: str = "",
+    replace_flag: bool = False
+) -> Tuple[Optional[str], Optional[str], Optional[str], List[str]]:
+    """
+    Auto-discovers det_ckpt, pose_ckpt, and sam_ckpt across common directory locations:
+      1. preprocess_ckpt_dir
+      2. process_checkpoint (official Hugging Face directory name in Wan2.2-Animate-14B)
+      3. ckpt_dir / "process_checkpoint"
+      4. ckpt_dir / "preprocess_ckpts"
+      5. ckpt_dir directly
+      6. SCRIPT_DIR / "process_checkpoint"
+      7. SCRIPT_DIR / "preprocess_ckpts"
+      8. SCRIPT_DIR / "preprocess_checkpoint"
+      9. SCRIPT_DIR directly
+
+    Returns:
+      (det_ckpt, pose_ckpt, sam_ckpt, searched_directories)
+    """
+    candidate_dirs = [
+        preprocess_ckpt_dir,
+        os.path.join(preprocess_ckpt_dir, "process_checkpoint") if preprocess_ckpt_dir else "",
+        os.path.join(preprocess_ckpt_dir, "preprocess_ckpts") if preprocess_ckpt_dir else "",
+        os.path.join(ckpt_dir, "process_checkpoint") if ckpt_dir else "",
+        os.path.join(ckpt_dir, "preprocess_ckpts") if ckpt_dir else "",
+        ckpt_dir,
+        os.path.join(SCRIPT_DIR, "process_checkpoint"),
+        os.path.join(SCRIPT_DIR, "preprocess_ckpts"),
+        os.path.join(SCRIPT_DIR, "preprocess_checkpoint"),
+        SCRIPT_DIR,
+    ]
+
+    valid_dirs = []
+    seen = set()
+    for d in candidate_dirs:
+        if d and os.path.isdir(d):
+            ab = os.path.abspath(d)
+            if ab not in seen:
+                seen.add(ab)
+                valid_dirs.append(ab)
+
+    det_ckpt = None
+    pose_ckpt = None
+    sam_ckpt = None
+
+    # 1. Search for det_ckpt (yolov10m.onnx)
+    for d in valid_dirs:
+        p1 = os.path.join(d, "det", "yolov10m.onnx")
+        p2 = os.path.join(d, "yolov10m.onnx")
+        if os.path.isfile(p1):
+            det_ckpt = p1
+            break
+        elif os.path.isfile(p2):
+            det_ckpt = p2
+            break
+
+    if det_ckpt is None:
+        for d in valid_dirs:
+            try:
+                for match in Path(d).rglob("*yolov10*.onnx"):
+                    if match.is_file():
+                        det_ckpt = str(match.resolve())
+                        break
+                if det_ckpt:
+                    break
+            except Exception:
+                pass
+
+    # 2. Search for pose_ckpt (vitpose_h_wholebody.onnx or vitpose directory containing end2end.onnx)
+    for d in valid_dirs:
+        p1 = os.path.join(d, "pose2d", "vitpose_h_wholebody.onnx")
+        p2 = os.path.join(d, "vitpose_h_wholebody.onnx")
+        p3 = os.path.join(d, "pose2d", "end2end.onnx")
+        p4 = os.path.join(d, "end2end.onnx")
+        if os.path.exists(p1):
+            pose_ckpt = p1
+            break
+        elif os.path.exists(p2):
+            pose_ckpt = p2
+            break
+        elif os.path.isfile(p3):
+            pose_ckpt = p3
+            break
+        elif os.path.isfile(p4):
+            pose_ckpt = p4
+            break
+
+    if pose_ckpt is None:
+        for d in valid_dirs:
+            try:
+                for match in Path(d).rglob("*vitpose_h_wholebody*"):
+                    if match.exists():
+                        pose_ckpt = str(match.resolve())
+                        break
+                if pose_ckpt:
+                    break
+            except Exception:
+                pass
+
+    # 3. Search for sam_ckpt (if replace_flag)
+    if replace_flag:
+        for d in valid_dirs:
+            p1 = os.path.join(d, "sam2", "sam2_hiera_large.pt")
+            p2 = os.path.join(d, "sam2_hiera_large.pt")
+            if os.path.isfile(p1):
+                sam_ckpt = p1
+                break
+            elif os.path.isfile(p2):
+                sam_ckpt = p2
+                break
+
+
+    return det_ckpt, pose_ckpt, sam_ckpt, valid_dirs
+
+
+def initialize_preprocessor(preprocess_ckpt_dir: str, ckpt_dir: str = "", replace_flag: bool = False, device: str = "cuda:0"):
     """
     Instantiates the ProcessPipeline for ViTPose keypoint detection and conditioning.
     """
-    det_ckpt = os.path.join(preprocess_ckpt_dir, "det", "yolov10m.onnx")
-    pose_ckpt = os.path.join(preprocess_ckpt_dir, "pose2d", "vitpose_h_wholebody.onnx")
-    sam_ckpt = os.path.join(preprocess_ckpt_dir, "sam2", "sam2_hiera_large.pt") if replace_flag else None
+    det_ckpt, pose_ckpt, sam_ckpt, searched_dirs = resolve_preprocess_checkpoints(
+        preprocess_ckpt_dir=preprocess_ckpt_dir,
+        ckpt_dir=ckpt_dir,
+        replace_flag=replace_flag
+    )
 
-    if not os.path.exists(det_ckpt) or not os.path.exists(pose_ckpt):
-        print(f"[Warning] Preprocess checkpoints not found in {preprocess_ckpt_dir}.")
-        print(f"  Expected: {det_ckpt} and {pose_ckpt}")
+    if det_ckpt is None or pose_ckpt is None:
+        missing = []
+        if det_ckpt is None:
+            missing.append("det/yolov10m.onnx (YOLO human detector)")
+        if pose_ckpt is None:
+            missing.append("pose2d/vitpose_h_wholebody.onnx (ViTPose WholeBody 133-keypoint estimator)")
+        if replace_flag and sam_ckpt is None:
+            missing.append("sam2/sam2_hiera_large.pt (SAM2 segmentation model)")
+
+        print("\n" + "=" * 80)
+        print("[ERROR] PREPROCESSING CHECKPOINTS MISSING!")
+        print("=" * 80)
+        print("Wan2.2 Animate requires ViTPose & YOLO ONNX models to extract poses from driving videos.")
+        print(f"Missing component(s): {', '.join(missing)}")
+        print("\nSearched directories:")
+        for sd in searched_dirs:
+            print(f"  - {sd}")
+        print("\n" + "-" * 80)
+        print("HOW TO RESOLVE THIS ERROR ON YOUR GPU SERVER:")
+        print("-" * 80)
+        print("1. If checkpoints are already downloaded in another directory:")
+        print("   Pass the directory using --preprocess_ckpt_dir, for example:")
+        print("   python run_animate_eval.py --preprocess_ckpt_dir /path/to/process_checkpoint ...")
+        print("\n2. If not downloaded yet, download from the official Hugging Face Wan2.2-Animate repo:")
+        print("   huggingface-cli download Wan-AI/Wan2.2-Animate-14B --include \"process_checkpoint/*\" --local-dir ./Wan2.2-Animate-14B")
+        print("   (Then run with: --preprocess_ckpt_dir ./Wan2.2-Animate-14B/process_checkpoint)")
+        print("\n3. If you already have pre-generated videos in the output folder and only want metrics:")
+        print("   Run with: --skip_inference")
+        print("=" * 80 + "\n")
         return None
 
+    print(f"[Init] Found preprocessing checkpoints:")
+    print(f"  - Detection: {det_ckpt}")
+    print(f"  - Pose:      {pose_ckpt}")
+    if replace_flag and sam_ckpt:
+        print(f"  - SAM2:      {sam_ckpt}")
+
     try:
-        from process_pipepline import ProcessPipeline
-        print(f"[Init] Initializing ProcessPipeline with ViTPose & YOLO...")
+        try:
+            from process_pipepline import ProcessPipeline
+        except ImportError:
+            from wan.modules.animate.preprocess.process_pipepline import ProcessPipeline
+
+        print(f"[Init] Initializing ProcessPipeline with ViTPose & YOLO (device: {device})...")
         pipeline = ProcessPipeline(
             det_checkpoint_path=det_ckpt,
             pose2d_checkpoint_path=pose_ckpt,
             sam_checkpoint_path=sam_ckpt,
             flux_kontext_path=None
         )
+        if hasattr(pipeline, "pose2d"):
+            try:
+                pipeline.pose2d.set_device(device)
+            except Exception:
+                pass
         return pipeline
     except Exception as e:
-        print(f"[Warning] Failed to instantiate ProcessPipeline: {e}")
-        return None
+        print(f"\n[Warning] Failed initializing ProcessPipeline with {device}: {e}")
+        traceback.print_exc()
+        try:
+            print("[Init] Retrying ProcessPipeline initialization on CPU...")
+            pipeline = ProcessPipeline(
+                det_checkpoint_path=det_ckpt,
+                pose2d_checkpoint_path=pose_ckpt,
+                sam_checkpoint_path=sam_ckpt,
+                flux_kontext_path=None
+            )
+            if hasattr(pipeline, "pose2d"):
+                pipeline.pose2d.set_device("cpu")
+            return pipeline
+        except Exception as e2:
+            print(f"[Error] Fallback to CPU also failed: {e2}")
+            traceback.print_exc()
+            return None
 
 
 def initialize_wan_animate(ckpt_dir: str, offload_model: bool = True, device: str = "cuda:0"):
     """
     Instantiates the WanAnimate pipeline once for all video generations.
     """
-    if not os.path.exists(ckpt_dir):
-        print(f"[Warning] WanAnimate checkpoint directory not found: {ckpt_dir}")
+    candidates = [
+        ckpt_dir,
+        os.path.join(SCRIPT_DIR, "Wan2.2-Animate-14B"),
+        "./Wan2.2-Animate-14B",
+        "../Wan2.2-Animate-14B",
+        os.path.join(SCRIPT_DIR, "Wan2.2-T2V-A14B")
+    ]
+    resolved_dir = None
+    for cand in candidates:
+        if cand and os.path.isdir(cand):
+            resolved_dir = os.path.abspath(cand)
+            break
+
+    if resolved_dir is None:
+        print(f"[Warning] WanAnimate checkpoint directory not found (searched: {ckpt_dir}, ./Wan2.2-Animate-14B)")
         return None
+
+    ckpt_dir = resolved_dir
 
     try:
         from easydict import EasyDict
@@ -369,7 +558,11 @@ def run_video_preprocessing(
         return True
 
     if preprocessor is None:
-        raise RuntimeError("Preprocessor (ProcessPipeline) is not initialized!")
+        raise RuntimeError(
+            f"Cannot preprocess '{os.path.basename(video_path)}': Preprocessor (ProcessPipeline) is not initialized.\n"
+            f"Please verify that ViTPose and YOLO checkpoints exist (pass --preprocess_ckpt_dir <path>), "
+            f"or use --skip_inference if animated videos are already generated."
+        )
 
     print(f"[Preprocess] Extracting poses and face crops: {os.path.basename(video_path)} -> {output_prep_dir}")
     success = preprocessor(
@@ -789,9 +982,30 @@ def main():
     if not args.skip_inference:
         preprocessor = initialize_preprocessor(
             preprocess_ckpt_dir=args.preprocess_ckpt_dir,
+            ckpt_dir=args.ckpt_dir,
             replace_flag=args.replace_flag,
             device=args.device
         )
+        if preprocessor is None:
+            all_cached = True
+            missing_cache = []
+            for vp in video_paths:
+                s = Path(vp).stem
+                p_dir = os.path.join(output_prep_dir, s)
+                req = ["src_pose.mp4", "src_face.mp4", "src_ref.png"]
+                if not all(os.path.exists(os.path.join(p_dir, f)) for f in req):
+                    all_cached = False
+                    missing_cache.append(s)
+
+            if all_cached:
+                print("[Notice] Preprocessor is not initialized, but all driving videos already have cached preprocessed data.")
+                print("[Notice] Continuing with generation using cached pose/face videos...")
+            else:
+                print(f"[Fatal Error] Cannot proceed with inference: {len(missing_cache)} video(s) require preprocessing ({', '.join(missing_cache[:3])}...),")
+                print("but the preprocessor could not be initialized.")
+                print("Please follow the instructions printed above to provide or download the preprocessing checkpoints.")
+                sys.exit(1)
+
         wan_model = initialize_wan_animate(
             ckpt_dir=args.ckpt_dir,
             offload_model=args.offload_model,
@@ -811,13 +1025,18 @@ def main():
         if preprocessor is not None and hasattr(preprocessor, "pose2d"):
             pose2d_eval_model = preprocessor.pose2d
         else:
-            pose_ckpt = os.path.join(args.preprocess_ckpt_dir, "pose2d", "vitpose_h_wholebody.onnx")
-            det_ckpt = os.path.join(args.preprocess_ckpt_dir, "det", "yolov10m.onnx")
-            if os.path.exists(pose_ckpt):
+            det_ckpt, pose_ckpt, _, _ = resolve_preprocess_checkpoints(
+                preprocess_ckpt_dir=args.preprocess_ckpt_dir,
+                ckpt_dir=args.ckpt_dir
+            )
+            if pose_ckpt and os.path.exists(pose_ckpt):
                 try:
                     from pose2d import Pose2d
-                    print("[Init] Initializing standalone Pose2d for evaluation...")
-                    pose2d_eval_model = Pose2d(checkpoint=pose_ckpt, detector_checkpoint=det_ckpt if os.path.exists(det_ckpt) else None)
+                    print(f"[Init] Initializing standalone Pose2d for evaluation from {pose_ckpt}...")
+                    pose2d_eval_model = Pose2d(
+                        checkpoint=pose_ckpt,
+                        detector_checkpoint=det_ckpt if det_ckpt and os.path.exists(det_ckpt) else None
+                    )
                 except Exception as e:
                     print(f"[Warning] Standalone Pose2d failed: {e}")
 

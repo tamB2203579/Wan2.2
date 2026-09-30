@@ -3,10 +3,6 @@ import os
 import numpy as np
 import shutil
 import torch
-try:
-    from diffusers import FluxKontextPipeline
-except ImportError:
-    FluxKontextPipeline = None
 import cv2
 try:
     from loguru import logger
@@ -15,16 +11,72 @@ except ImportError:
 from PIL import Image
 try:
     import moviepy.editor as mpy
-except ImportError:
+except Exception:
     try:
         import moviepy as mpy
-    except ImportError:
+    except Exception:
         mpy = None
+
+def save_clip_video(images, output_path, fps=30):
+    if mpy is not None:
+        try:
+            mpy.ImageSequenceClip(images, fps=fps).write_videofile(output_path, logger=None)
+            return
+        except Exception:
+            pass
+    try:
+        import imageio
+        writer = imageio.get_writer(output_path, fps=fps, codec='libx264', quality=8)
+        for img in images:
+            writer.append_data(img)
+        writer.close()
+        return
+    except Exception:
+        pass
+    h, w = images[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    for img in images:
+        out.write(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    out.release()
 
 try:
     from decord import VideoReader
-except ImportError:
-    VideoReader = None
+except Exception:
+    class VideoReader:
+        def __init__(self, uri, ctx=None):
+            self.uri = str(uri)
+            cap = cv2.VideoCapture(self.uri)
+            self._frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                self._frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            self.fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            cap.release()
+            self._data = np.stack(self._frames, axis=0) if self._frames else np.zeros((0, 0, 0, 3), dtype=np.uint8)
+
+        def __len__(self):
+            return len(self._frames)
+
+        def get_avg_fps(self):
+            return self.fps
+
+        def get_frame_timestamp(self, idx):
+            if idx == -1 or idx == len(self._frames) - 1:
+                return [0.0, len(self._frames) / self.fps]
+            return [0.0, idx / self.fps]
+
+        def get_batch(self, indices):
+            class BatchWrapper:
+                def __init__(self, arr):
+                    self.arr = arr
+                def asnumpy(self):
+                    return self.arr
+            if isinstance(indices, (int, slice)):
+                return BatchWrapper(self._data[indices])
+            return BatchWrapper(self._data[list(indices)])
 from pose2d import Pose2d
 from pose2d_utils import AAPoseMeta
 from utils import resize_by_area, get_frame_indices, padding_resize, get_face_bboxes, get_aug_mask, get_mask_body_img
@@ -97,6 +149,11 @@ class ProcessPipeline():
 
             logger.info(f"Processing reference image: {refer_image_path}")
             refer_img = cv2.imread(refer_image_path)
+            if refer_img is None:
+                try:
+                    refer_img = cv2.imdecode(np.fromfile(refer_image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                except Exception:
+                    pass
             src_ref_path = os.path.join(output_path, 'src_ref.png')
             shutil.copy(refer_image_path, src_ref_path)
             refer_img = refer_img[..., ::-1]
@@ -142,6 +199,11 @@ class ProcessPipeline():
         else:
             logger.info(f"Processing reference image: {refer_image_path}")
             refer_img = cv2.imread(refer_image_path)
+            if refer_img is None:
+                try:
+                    refer_img = cv2.imdecode(np.fromfile(refer_image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                except Exception:
+                    pass
             src_ref_path = os.path.join(output_path, 'src_ref.png')
             shutil.copy(refer_image_path, src_ref_path)
             refer_img = refer_img[..., ::-1]
