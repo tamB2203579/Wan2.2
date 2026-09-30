@@ -12,7 +12,43 @@ import torch
 
 import torch.distributed as dist
 from peft import set_peft_model_state_dict
-from decord import VideoReader
+try:
+    from decord import VideoReader
+except Exception:
+    class VideoReader:
+        def __init__(self, uri, ctx=None):
+            self.uri = str(uri)
+            cap = cv2.VideoCapture(self.uri)
+            self._frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                self._frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            self.fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            cap.release()
+            self._data = np.stack(self._frames, axis=0) if self._frames else np.zeros((0, 0, 0, 3), dtype=np.uint8)
+
+        def __len__(self):
+            return len(self._frames)
+
+        def get_avg_fps(self):
+            return self.fps
+
+        def get_frame_timestamp(self, idx):
+            if idx == -1 or idx == len(self._frames) - 1:
+                return [0.0, len(self._frames) / self.fps]
+            return [0.0, idx / self.fps]
+
+        def get_batch(self, indices):
+            class BatchWrapper:
+                def __init__(self, arr):
+                    self.arr = arr
+                def asnumpy(self):
+                    return self.arr
+            if isinstance(indices, (int, slice)):
+                return BatchWrapper(self._data[indices])
+            return BatchWrapper(self._data[list(indices)])
 from tqdm import tqdm
 import torch.nn.functional as F
 from .distributed.fsdp import shard_model

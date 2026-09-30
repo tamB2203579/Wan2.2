@@ -5,7 +5,10 @@ import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+try:
+    from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+except Exception:
+    Wav2Vec2ForCTC, Wav2Vec2Processor = None, None
 
 
 def get_sample_indices(original_fps,

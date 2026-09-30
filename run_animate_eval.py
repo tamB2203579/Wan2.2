@@ -421,6 +421,18 @@ def initialize_preprocessor(preprocess_ckpt_dir: str, ckpt_dir: str = "", replac
         print(f"  - SAM2:      {sam_ckpt}")
 
     try:
+        import onnxruntime
+    except ImportError:
+        print("\n" + "=" * 80)
+        print("[ERROR] MISSING DEPENDENCY: onnxruntime / onnxruntime-gpu")
+        print("=" * 80)
+        print("ViTPose (pose estimation) and YOLO (human detection) require ONNX Runtime.")
+        print("Please install onnxruntime-gpu in your environment on the GPU server:")
+        print("    pip install onnxruntime-gpu")
+        print("=" * 80 + "\n")
+        return None
+
+    try:
         try:
             from process_pipepline import ProcessPipeline
         except ImportError:

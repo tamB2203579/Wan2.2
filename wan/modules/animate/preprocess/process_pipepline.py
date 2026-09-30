@@ -18,7 +18,7 @@ except Exception:
         mpy = None
 
 def save_clip_video(images, output_path, fps=30):
-    if mpy is not None:
+    if mpy is not None and hasattr(mpy, 'ImageSequenceClip'):
         try:
             mpy.ImageSequenceClip(images, fps=fps).write_videofile(output_path, logger=None)
             return
@@ -101,7 +101,14 @@ class ProcessPipeline():
         if sam_checkpoint_path is not None:
             self.predictor = build_sam2_video_predictor(model_cfg, sam_checkpoint_path)
         if flux_kontext_path is not None:
-            self.flux_kontext = FluxKontextPipeline.from_pretrained(flux_kontext_path, torch_dtype=torch.bfloat16).to("cuda")
+            try:
+                from diffusers import FluxKontextPipeline
+                self.flux_kontext = FluxKontextPipeline.from_pretrained(flux_kontext_path, torch_dtype=torch.bfloat16).to("cuda")
+            except Exception as e:
+                logger.warning(f"Failed to load FluxKontextPipeline: {e}. Flux image editing disabled.")
+                self.flux_kontext = None
+        else:
+            self.flux_kontext = None
 
     def __call__(self, video_path, refer_image_path, output_path, resolution_area=[1280, 720], fps=30, iterations=3, k=7, w_len=1, h_len=1, retarget_flag=False, use_flux=False, replace_flag=False):
         if replace_flag:
@@ -184,17 +191,17 @@ class ProcessPipeline():
                 aug_masks.append(each_aug_mask)
 
             src_face_path = os.path.join(output_path, 'src_face.mp4')
-            mpy.ImageSequenceClip(face_images, fps=fps).write_videofile(src_face_path)
+            save_clip_video(face_images, src_face_path, fps=fps)
 
             src_pose_path = os.path.join(output_path, 'src_pose.mp4')
-            mpy.ImageSequenceClip(cond_images, fps=fps).write_videofile(src_pose_path)
+            save_clip_video(cond_images, src_pose_path, fps=fps)
 
             src_bg_path = os.path.join(output_path, 'src_bg.mp4')
-            mpy.ImageSequenceClip(bg_images, fps=fps).write_videofile(src_bg_path)
+            save_clip_video(bg_images, src_bg_path, fps=fps)
 
             aug_masks_new = [np.stack([mask * 255, mask * 255, mask * 255], axis=2) for mask in aug_masks]
             src_mask_path = os.path.join(output_path, 'src_mask.mp4')
-            mpy.ImageSequenceClip(aug_masks_new, fps=fps).write_videofile(src_mask_path)
+            save_clip_video(aug_masks_new, src_mask_path, fps=fps)
             return True
         else:
             logger.info(f"Processing reference image: {refer_image_path}")
@@ -306,10 +313,10 @@ class ProcessPipeline():
                 cond_images.append(conditioning_image)
 
             src_face_path = os.path.join(output_path, 'src_face.mp4')
-            mpy.ImageSequenceClip(face_images, fps=fps).write_videofile(src_face_path)
+            save_clip_video(face_images, src_face_path, fps=fps)
 
             src_pose_path = os.path.join(output_path, 'src_pose.mp4')
-            mpy.ImageSequenceClip(cond_images, fps=fps).write_videofile(src_pose_path)
+            save_clip_video(cond_images, src_pose_path, fps=fps)
             return True
 
     def get_editing_prompts(self, tpl_pose_metas, refer_pose_meta):

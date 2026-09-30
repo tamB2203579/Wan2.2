@@ -24,8 +24,12 @@ from tqdm import tqdm
 from .distributed.fsdp import shard_model
 from .distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
 from .distributed.util import get_world_size
-from .modules.s2v.audio_encoder import AudioEncoder
-from .modules.s2v.model_s2v import WanModel_S2V, sp_attn_forward_s2v
+try:
+    from .modules.s2v.audio_encoder import AudioEncoder
+    from .modules.s2v.model_s2v import WanModel_S2V, sp_attn_forward_s2v
+except Exception:
+    AudioEncoder = None
+    WanModel_S2V, sp_attn_forward_s2v = None, None
 from .modules.t5 import T5EncoderModel
 from .modules.vae2_1 import Wan2_1_VAE
 from .utils.fm_solvers import (
