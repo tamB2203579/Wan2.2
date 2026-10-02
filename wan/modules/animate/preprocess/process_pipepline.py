@@ -40,6 +40,12 @@ def save_clip_video(images, output_path, fps=30):
         out.write(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
     out.release()
 
+def read_image_safely(path):
+    img = cv2.imread(str(path))
+    if img is None:
+        img = cv2.cvtColor(np.array(Image.open(str(path)).convert("RGB")), cv2.COLOR_RGB2BGR)
+    return img
+
 try:
     from decord import VideoReader
 except Exception:
@@ -155,14 +161,12 @@ class ProcessPipeline():
                 face_images.append(face_image)
 
             logger.info(f"Processing reference image: {refer_image_path}")
-            refer_img = cv2.imread(refer_image_path)
-            if refer_img is None:
-                try:
-                    refer_img = cv2.imdecode(np.fromfile(refer_image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-                except Exception:
-                    pass
+            refer_img = read_image_safely(refer_image_path)
             src_ref_path = os.path.join(output_path, 'src_ref.png')
-            shutil.copy(refer_image_path, src_ref_path)
+            try:
+                cv2.imwrite(src_ref_path, refer_img)
+            except Exception:
+                shutil.copy(refer_image_path, src_ref_path)
             refer_img = refer_img[..., ::-1]
 
             refer_img = padding_resize(refer_img, height, width)
@@ -205,14 +209,12 @@ class ProcessPipeline():
             return True
         else:
             logger.info(f"Processing reference image: {refer_image_path}")
-            refer_img = cv2.imread(refer_image_path)
-            if refer_img is None:
-                try:
-                    refer_img = cv2.imdecode(np.fromfile(refer_image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
-                except Exception:
-                    pass
+            refer_img = read_image_safely(refer_image_path)
             src_ref_path = os.path.join(output_path, 'src_ref.png')
-            shutil.copy(refer_image_path, src_ref_path)
+            try:
+                cv2.imwrite(src_ref_path, refer_img)
+            except Exception:
+                shutil.copy(refer_image_path, src_ref_path)
             refer_img = refer_img[..., ::-1]
             
             refer_img = resize_by_area(refer_img, resolution_area[0] * resolution_area[1], divisor=16)

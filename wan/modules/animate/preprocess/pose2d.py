@@ -380,10 +380,11 @@ class Pose2d:
                 cap.release()
                 images = frames
             elif inputs.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
-                img = cv2.cvtColor(cv2.imread(inputs), cv2.COLOR_BGR2RGB)
+                img = cv2.imread(inputs)
                 if img is None:
-                    raise ValueError(f"Cannot read image: {inputs}")
-                images = [img]
+                    from PIL import Image
+                    img = cv2.cvtColor(np.array(Image.open(inputs).convert('RGB')), cv2.COLOR_RGB2BGR)
+                images = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB)]
             else:
                 raise ValueError(f"Unsupported file format: {inputs}")
                 

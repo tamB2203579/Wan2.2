@@ -313,7 +313,11 @@ class WanAnimate:
         face_idxs = list(range(face_len))
         face_images = face_video_reader.get_batch(face_idxs).asnumpy()
         height, width = cond_images[0].shape[:2]
-        refer_images = cv2.imread(src_ref_path)[..., ::-1]
+        refer_images = cv2.imread(src_ref_path)
+        if refer_images is None:
+            from PIL import Image
+            refer_images = cv2.cvtColor(np.array(Image.open(src_ref_path).convert('RGB')), cv2.COLOR_RGB2BGR)
+        refer_images = refer_images[..., ::-1]
         refer_images = self.padding_resize(refer_images, height=height, width=width)
         return cond_images, face_images, refer_images
     
